@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart';
@@ -23,7 +25,7 @@ void main() async {
     initializationSettings,
     onDidReceiveNotificationResponse: (NotificationResponse response) {
       if (response.payload != null) {
-        final parts = response.payload!.split('|'); // deviceName|hours
+        final parts = response.payload!.split('|');
         if (parts.length == 2) {
           final deviceName = parts[0];
           final hours = int.tryParse(parts[1]) ?? 0;
@@ -44,7 +46,7 @@ class StarlinkTextExpanderApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'مدير Starlink التلقائي',
+      title: 'مدير Starlink والاختصارات',
       debugShowCheckedModeBanner: false,
       locale: const Locale('ar', 'SA'),
       supportedLocales: const [Locale('ar', 'SA')],
@@ -92,8 +94,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
             label: 'مدير Starlink',
           ),
           NavigationDestination(
-            icon: Icon(Icons.text_fields),
-            selectedIcon: Icon(Icons.text_snippet),
+            icon: Icon(Icons.bolt),
+            selectedIcon: Icon(Icons.flash_on),
             label: 'الاختصارات (Texpand)',
           ),
         ],
@@ -102,6 +104,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   }
 }
 
+// ==================== 1. مدير شبكة Starlink ====================
 class StarlinkManagerTab extends StatefulWidget {
   const StarlinkManagerTab({super.key});
 
@@ -118,6 +121,7 @@ class StarlinkManagerTab extends StatefulWidget {
 class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
   List<ClientDevice> _clients = [];
   Set<String> _knownIPs = {};
+  Set<String> _notifiedExpiredIDs = {};
   Timer? _timer;
   Timer? _bgScanTimer;
 
@@ -129,12 +133,15 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
   void initState() {
     super.initState();
     _loadClients();
+
+    // فحص كل ثانية لتحديث العداد وإرسال تنبيه الانتهاء
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _checkExpiredClients();
       if (mounted) setState(() {});
     });
 
-    // مراقبة الشبكة تلقائياً كل 30 ثانية
-    _bgScanTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+    // مراقبة أجهزة الشبكة الجديدة كل 25 ثانية
+    _bgScanTimer = Timer.periodic(const Duration(seconds: 25), (_) {
       _autoScanNetwork();
     });
   }
@@ -161,7 +168,35 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
     await prefs.setStringList('starlink_clients', data);
   }
 
-  // فحص الشبكة واستخراج اسم الجهاز برقم الـ IP
+  // فحص الأجهزة المنتهية وإرسال إشعار فوري
+  void _checkExpiredClients() {
+    for (var client in _clients) {
+      if (client.remainingSeconds <= 0 && !_notifiedExpiredIDs.contains(client.id)) {
+        _notifiedExpiredIDs.add(client.id);
+        _showExpiredNotification(client.deviceName);
+      }
+    }
+  }
+
+  Future<void> _showExpiredNotification(String deviceName) async {
+    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+      'starlink_expired_channel',
+      'تنبيهات انتهاء الوقت',
+      channelDescription: 'تنبيه فوري عند انتهاء وقت اشتراك جهاز',
+      importance: Importance.max,
+      priority: Priority.high,
+      playSound: true,
+    );
+    const NotificationDetails platformDetails = NotificationDetails(android: androidDetails);
+
+    await flutterLocalNotificationsPlugin.show(
+      DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      '⏰ انتهى وقت الاشتراك!',
+      'الجهاز: $deviceName انتهت مدته الحالية. قم بفصله من Starlink.',
+      platformDetails,
+    );
+  }
+
   Future<void> _autoScanNetwork() async {
     final info = NetworkInfo();
     final wifiIP = await info.getWifiIP();
@@ -174,13 +209,12 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
       final ipSuffix = '.$i';
 
       try {
-        final socket = await Socket.connect(targetIP, 80, timeout: const Duration(milliseconds: 40));
+        final socket = await Socket.connect(targetIP, 80, timeout: const Duration(milliseconds: 35));
         socket.destroy();
 
-        // محاولة جلب اسم هاتف الجهاز العميل
         String resolvedHost = 'جهاز';
         try {
-          final hostObj = await InternetAddress(targetIP).reverse().timeout(const Duration(milliseconds: 80));
+          final hostObj = await InternetAddress(targetIP).reverse().timeout(const Duration(milliseconds: 60));
           if (hostObj.host.isNotEmpty && hostObj.host != targetIP) {
             resolvedHost = hostObj.host.split('.').first;
           }
@@ -193,15 +227,13 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
         _knownIPs.add(fullDeviceLabel);
         _knownIPs.add(targetIP);
 
-        // إرسال الإشعار بالاسم والـ IP التلقائي
         _showNewDeviceNotification(fullDeviceLabel, ipSuffix);
       } catch (_) {}
     }
   }
 
   Future<void> _showNewDeviceNotification(String fullLabel, String ipSuffix) async {
-    const AndroidNotificationDetails androidPlatformChannelSpecifics =
-        AndroidNotificationDetails(
+    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
       'starlink_auto_channel',
       'تنبيهات أجهزة Starlink',
       channelDescription: 'تنبيهات فورية عند اتصال أجهزة جديدة',
@@ -213,14 +245,13 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
         AndroidNotificationAction('cancel', 'إلغاء / حظر'),
       ],
     );
-    const NotificationDetails platformChannelSpecifics =
-        NotificationDetails(android: androidPlatformChannelSpecifics);
+    const NotificationDetails platformDetails = NotificationDetails(android: androidDetails);
 
     await flutterLocalNotificationsPlugin.show(
       DateTime.now().millisecondsSinceEpoch ~/ 1000,
       '📡 جهاز جديد اتصل بالشبكة!',
-      '$fullLabel - حدد مدة الاشتراك:',
-      platformChannelSpecifics,
+      '$fullLabel - اختر مدة الاشتراك:',
+      platformDetails,
       payload: '$fullLabel|4',
     );
   }
@@ -273,23 +304,21 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
             onPressed: () {
               _autoScanNetwork();
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('جاري التعرف على أجهزة Starlink جديدة...')),
+                const SnackBar(content: Text('جاري فحص الشبكة...')),
               );
             },
           ),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () {
-          _addClient('جهاز يدوي (.${DateTime.now().second})', 4);
-        },
+        onPressed: () => _showManualAddDialog(),
         icon: const Icon(Icons.add_link),
         label: const Text('إضافة يدوي'),
       ),
       body: _clients.isEmpty
           ? const Center(
               child: Text(
-                'المراقب التلقائي شغال 📡\nعند دخول أي جهاز لشبكة Starlink سيصلك إشعار باسم الهاتف ورقم الـ IP مباشرة.',
+                'المراقب التلقائي شغال 📡\nعند دخول أي جهاز لشبكة Starlink سيصلك إشعار باسم الهاتف والـ IP.',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 15, color: Colors.grey),
               ),
@@ -364,8 +393,53 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
             ),
     );
   }
+
+  void _showManualAddDialog() {
+    final nameController = TextEditingController();
+    int hours = 4;
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('إضافة جهاز يدوي'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameController,
+              decoration: const InputDecoration(
+                labelText: 'اسم الجهاز أو الـ IP',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [2, 4, 8, 12].map((h) => ChoiceChip(
+                label: Text('$hس'),
+                selected: hours == h,
+                onSelected: (v) { if (v) setState(() => hours = h); },
+              )).toList(),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
+          ElevatedButton(
+            onPressed: () {
+              if (nameController.text.isNotEmpty) {
+                _addClient(nameController.text.trim(), hours);
+                Navigator.pop(ctx);
+              }
+            },
+            child: const Text('إضافة'),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
+// ==================== 2. مكتبة الاختصارات التفاعلية (Texpand) ====================
 class TextExpanderTab extends StatefulWidget {
   const TextExpanderTab({super.key});
 
@@ -374,32 +448,151 @@ class TextExpanderTab extends StatefulWidget {
 }
 
 class _TextExpanderTabState extends State<TextExpanderTab> {
-  final List<Map<String, String>> _shortcuts = [
-    {'shortcut': '#سلا', 'expanded': 'السلام عليكم ورحمة الله وبركاته'},
-    {'shortcut': '#وقت', 'expanded': 'الوقت الحالي: %time%'},
-  ];
+  List<Map<String, String>> _shortcuts = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadShortcuts();
+  }
+
+  Future<void> _loadShortcuts() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String? data = prefs.getString('saved_shortcuts');
+    if (data != null) {
+      final List decoded = jsonDecode(data);
+      setState(() {
+        _shortcuts = decoded.map((e) => Map<String, String>.from(e)).toList();
+      });
+    } else {
+      // اختصارات افتراضية
+      _shortcuts = [
+        {'shortcut': '#سلا', 'expanded': 'السلام عليكم ورحمة الله وبركاته'},
+        {'shortcut': '#مرحب', 'expanded': 'أهلاً وسهلاً بك في خِدْمَاتِنا!'},
+        {'shortcut': '#حساب', 'expanded': 'رقم الحساب المصرفي: 1234-5678-9012'},
+      ];
+      _saveShortcuts();
+    }
+  }
+
+  Future<void> _saveShortcuts() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('saved_shortcuts', jsonEncode(_shortcuts));
+  }
+
+  void _addOrEditShortcut({int? index}) {
+    final shortcutCtrl = TextEditingController(text: index != null ? _shortcuts[index]['shortcut'] : '#');
+    final expandedCtrl = TextEditingController(text: index != null ? _shortcuts[index]['expanded'] : '');
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(index == null ? 'إضافة اختصار جديد' : 'تعديل الاختصار'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: shortcutCtrl,
+              decoration: const InputDecoration(
+                labelText: 'رمز الاختصار (مثال: #سلا)',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: expandedCtrl,
+              maxLines: 3,
+              decoration: const InputDecoration(
+                labelText: 'النص الكامل البديل',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
+          ElevatedButton(
+            onPressed: () {
+              if (shortcutCtrl.text.isNotEmpty && expandedCtrl.text.isNotEmpty) {
+                setState(() {
+                  if (index == null) {
+                    _shortcuts.add({'shortcut': shortcutCtrl.text, 'expanded': expandedCtrl.text});
+                  } else {
+                    _shortcuts[index] = {'shortcut': shortcutCtrl.text, 'expanded': expandedCtrl.text};
+                  }
+                });
+                _saveShortcuts();
+                Navigator.pop(ctx);
+              }
+            },
+            child: const Text('حفظ'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _deleteShortcut(int index) {
+    setState(() {
+      _shortcuts.removeAt(index);
+    });
+    _saveShortcuts();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('مكتبة الاختصارات'),
+        title: const Text('مكتبة الاختصارات (Texpand)'),
         centerTitle: true,
       ),
-      body: ListView.builder(
-        padding: const EdgeInsets.all(12),
-        itemCount: _shortcuts.length,
-        itemBuilder: (context, index) {
-          final item = _shortcuts[index];
-          return Card(
-            child: ListTile(
-              leading: const Icon(Icons.bolt, color: Colors.amber),
-              title: Text(item['shortcut']!, style: const TextStyle(fontWeight: FontWeight.bold)),
-              subtitle: Text(item['expanded']!),
-            ),
-          );
-        },
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => _addOrEditShortcut(),
+        child: const Icon(Icons.add),
       ),
+      body: _shortcuts.isEmpty
+          ? const Center(child: Text('لا توجد اختصارات محفوظة.'))
+          : ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: _shortcuts.length,
+              itemBuilder: (context, index) {
+                final item = _shortcuts[index];
+                return Card(
+                  margin: const EdgeInsets.symmetric(vertical: 4),
+                  child: ListTile(
+                    leading: const Icon(Icons.bolt, color: Colors.amber),
+                    title: Text(
+                      item['shortcut']!,
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                    ),
+                    subtitle: Text(item['expanded']!),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.copy, color: Colors.blue),
+                          tooltip: 'نسخ النص',
+                          onPressed: () {
+                            Clipboard.setData(ClipboardData(text: item['expanded']!));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('تم نسخ النص إلى الحافظة!')),
+                            );
+                          },
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.edit, color: Colors.grey),
+                          onPressed: () => _addOrEditShortcut(index: index),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+                          onPressed: () => _deleteShortcut(index),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
     );
   }
 }
