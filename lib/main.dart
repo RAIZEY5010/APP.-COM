@@ -1,14 +1,40 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart';
 import 'package:network_info_plus/network_info_plus.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'models/client_model.dart';
 
-void main() {
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+    FlutterLocalNotificationsPlugin();
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  const AndroidInitializationSettings initializationSettingsAndroid =
+      AndroidInitializationSettings('@mipmap/ic_launcher');
+  const InitializationSettings initializationSettings =
+      InitializationSettings(android: initializationSettingsAndroid);
+
+  await flutterLocalNotificationsPlugin.initialize(
+    initializationSettings,
+    onDidReceiveNotificationResponse: (NotificationResponse response) {
+      if (response.payload != null) {
+        final parts = response.payload!.split('|'); // deviceName|hours
+        if (parts.length == 2) {
+          final deviceName = parts[0];
+          final hours = int.tryParse(parts[1]) ?? 0;
+          if (hours > 0) {
+            _StarlinkManagerTabState.addClientByIpStatic(deviceName, hours);
+          }
+        }
+      }
+    },
+  );
+
   runApp(const StarlinkTextExpanderApp());
 }
 
@@ -18,7 +44,7 @@ class StarlinkTextExpanderApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'مدير Starlink والاختصارات',
+      title: 'مدير Starlink التلقائي',
       debugShowCheckedModeBanner: false,
       locale: const Locale('ar', 'SA'),
       supportedLocales: const [Locale('ar', 'SA')],
@@ -76,18 +102,28 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   }
 }
 
-// ==================== تبويب مدير Starlink ====================
 class StarlinkManagerTab extends StatefulWidget {
   const StarlinkManagerTab({super.key});
 
+  static _StarlinkManagerTabState? globalState;
+
   @override
-  State<StarlinkManagerTab> createState() => _StarlinkManagerTabState();
+  State<StarlinkManagerTab> createState() {
+    final state = _StarlinkManagerTabState();
+    globalState = state;
+    return state;
+  }
 }
 
 class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
   List<ClientDevice> _clients = [];
-  bool _isScanning = false;
+  Set<String> _knownIPs = {};
   Timer? _timer;
+  Timer? _bgScanTimer;
+
+  static void addClientByIpStatic(String name, int hours) {
+    StarlinkManagerTab.globalState?._addClient(name, hours);
+  }
 
   @override
   void initState() {
@@ -96,11 +132,17 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() {});
     });
+
+    // مراقبة الشبكة تلقائياً كل 30 ثانية
+    _bgScanTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _autoScanNetwork();
+    });
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _bgScanTimer?.cancel();
     super.dispose();
   }
 
@@ -109,6 +151,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
     final data = prefs.getStringList('starlink_clients') ?? [];
     setState(() {
       _clients = data.map((item) => ClientDevice.fromJson(item)).toList();
+      _knownIPs = _clients.map((c) => c.deviceName).toSet();
     });
   }
 
@@ -118,42 +161,68 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
     await prefs.setStringList('starlink_clients', data);
   }
 
-  // فحص الأجهزة المتصلة بشبكة Starlink الحالية
-  Future<void> _scanStarlinkNetwork() async {
-    setState(() => _isScanning = true);
+  // فحص الشبكة واستخراج اسم الجهاز برقم الـ IP
+  Future<void> _autoScanNetwork() async {
     final info = NetworkInfo();
     final wifiIP = await info.getWifiIP();
-
-    if (wifiIP == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('يرجى الاتصال بشبكة Starlink أولاً!')),
-        );
-      }
-      setState(() => _isScanning = false);
-      return;
-    }
+    if (wifiIP == null) return;
 
     final subnet = wifiIP.substring(0, wifiIP.lastIndexOf('.'));
-    int foundCount = 0;
 
-    // مسح النطاق المحلي للشبكة
-    for (int i = 1; i < 50; i++) {
+    for (int i = 2; i < 50; i++) {
       final targetIP = '$subnet.$i';
+      final ipSuffix = '.$i';
+
       try {
-        final socket = await Socket.connect(targetIP, 80, timeout: const Duration(milliseconds: 50));
+        final socket = await Socket.connect(targetIP, 80, timeout: const Duration(milliseconds: 40));
         socket.destroy();
-        foundCount++;
+
+        // محاولة جلب اسم هاتف الجهاز العميل
+        String resolvedHost = 'جهاز';
+        try {
+          final hostObj = await InternetAddress(targetIP).reverse().timeout(const Duration(milliseconds: 80));
+          if (hostObj.host.isNotEmpty && hostObj.host != targetIP) {
+            resolvedHost = hostObj.host.split('.').first;
+          }
+        } catch (_) {}
+
+        final fullDeviceLabel = '$resolvedHost ($ipSuffix)';
+
+        if (_knownIPs.contains(fullDeviceLabel) || _knownIPs.contains(targetIP)) continue;
+
+        _knownIPs.add(fullDeviceLabel);
+        _knownIPs.add(targetIP);
+
+        // إرسال الإشعار بالاسم والـ IP التلقائي
+        _showNewDeviceNotification(fullDeviceLabel, ipSuffix);
       } catch (_) {}
     }
+  }
 
-    setState(() => _isScanning = false);
+  Future<void> _showNewDeviceNotification(String fullLabel, String ipSuffix) async {
+    const AndroidNotificationDetails androidPlatformChannelSpecifics =
+        AndroidNotificationDetails(
+      'starlink_auto_channel',
+      'تنبيهات أجهزة Starlink',
+      channelDescription: 'تنبيهات فورية عند اتصال أجهزة جديدة',
+      importance: Importance.max,
+      priority: Priority.high,
+      actions: [
+        AndroidNotificationAction('2h', '2 ساعة'),
+        AndroidNotificationAction('4h', '4 ساعات'),
+        AndroidNotificationAction('cancel', 'إلغاء / حظر'),
+      ],
+    );
+    const NotificationDetails platformChannelSpecifics =
+        NotificationDetails(android: androidPlatformChannelSpecifics);
 
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('تم فحص شبكة Starlink! عُثر على $foundCount جهازاً نشطاً.')),
-      );
-    }
+    await flutterLocalNotificationsPlugin.show(
+      DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      '📡 جهاز جديد اتصل بالشبكة!',
+      '$fullLabel - حدد مدة الاشتراك:',
+      platformChannelSpecifics,
+      payload: '$fullLabel|4',
+    );
   }
 
   void _addClient(String name, int hours) {
@@ -165,6 +234,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
     );
     setState(() {
       _clients.add(newClient);
+      _knownIPs.add(name);
     });
     _saveClients();
   }
@@ -188,97 +258,40 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
     _saveClients();
   }
 
-  void _showAddClientDialog() {
-    final nameController = TextEditingController();
-    int selectedHours = 4;
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('إضافة جهاز متصل جديد'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(
-                labelText: 'اسم الجهاز (مثل: Redmi-13C)',
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.phone_android),
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Text('مدة الاشتراك:'),
-            const SizedBox(height: 8),
-            StatefulBuilder(
-              builder: (context, setDialogState) => Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [2, 4, 8, 12].map((hours) {
-                  final isSelected = selectedHours == hours;
-                  return ChoiceChip(
-                    label: Text('$hoursس'),
-                    selected: isSelected,
-                    onSelected: (val) {
-                      if (val) setDialogState(() => selectedHours = hours);
-                    },
-                  );
-                }).toList(),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('إلغاء'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              final name = nameController.text.trim();
-              if (name.isNotEmpty) {
-                _addClient(name, selectedHours);
-                Navigator.pop(ctx);
-              }
-            },
-            child: const Text('إضافة وحساب الوقت'),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final timeFormat = DateFormat('hh:mm a', 'ar');
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('أجهزة Starlink المتصلة'),
+        title: const Text('مراقب Starlink التلقائي'),
         centerTitle: true,
         actions: [
-          _isScanning
-              ? const Padding(
-                  padding: EdgeInsets.all(12.0),
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : IconButton(
-                  icon: const Icon(Icons.radar),
-                  tooltip: 'فحص شبكة Starlink',
-                  onPressed: _scanStarlinkNetwork,
-                ),
+          IconButton(
+            icon: const Icon(Icons.radar),
+            tooltip: 'فحص الشبكة فوراً',
+            onPressed: () {
+              _autoScanNetwork();
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('جاري التعرف على أجهزة Starlink جديدة...')),
+              );
+            },
+          ),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showAddClientDialog,
+        onPressed: () {
+          _addClient('جهاز يدوي (.${DateTime.now().second})', 4);
+        },
         icon: const Icon(Icons.add_link),
-        label: const Text('ربط جهاز جديد'),
+        label: const Text('إضافة يدوي'),
       ),
       body: _clients.isEmpty
           ? const Center(
               child: Text(
-                'لا توجد أجهزة مربوطة حالياً.\nاضغط على أيقونة الرادار للفحص أو "ربط جهاز جديد".',
+                'المراقب التلقائي شغال 📡\nعند دخول أي جهاز لشبكة Starlink سيصلك إشعار باسم الهاتف ورقم الـ IP مباشرة.',
                 textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 16, color: Colors.grey),
+                style: TextStyle(fontSize: 15, color: Colors.grey),
               ),
             )
           : ListView.builder(
@@ -312,15 +325,15 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                     subtitle: Column(
-                      crossAxisAlignment: CrossAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const SizedBox(height: 4),
-                        Text('وقت الاتصال: ${timeFormat.format(client.startTime)}'),
-                        Text('وقت الانتهاء: ${timeFormat.format(endAt)}'),
+                        Text('بداية الاتصال: ${timeFormat.format(client.startTime)}'),
+                        Text('ينتهي في: ${timeFormat.format(endAt)}'),
                         const SizedBox(height: 4),
                         Text(
                           isExpired
-                              ? 'الوضع: منتهي الاشتراك ❌'
+                              ? 'الوضع: منتهي! قم بفصله من Starlink ❌'
                               : 'المتبقي: ${client.remainingFormatted} ${client.isPaused ? "(مؤقت)" : ""}',
                           style: TextStyle(
                             fontWeight: FontWeight.bold,
@@ -338,12 +351,10 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
                           icon: Icon(client.isPaused ? Icons.play_arrow : Icons.pause),
                           color: Colors.orange,
                           onPressed: () => _togglePause(client),
-                          tooltip: client.isPaused ? 'استئناف' : 'إيقاف مؤقت',
                         ),
                         IconButton(
                           icon: const Icon(Icons.delete_outline, color: Colors.red),
                           onPressed: () => _deleteClient(client.id),
-                          tooltip: 'حذف الجهاز',
                         ),
                       ],
                     ),
@@ -355,7 +366,6 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
   }
 }
 
-// ==================== تبويب الاختصارات (Texpand) ====================
 class TextExpanderTab extends StatefulWidget {
   const TextExpanderTab({super.key});
 
@@ -367,19 +377,14 @@ class _TextExpanderTabState extends State<TextExpanderTab> {
   final List<Map<String, String>> _shortcuts = [
     {'shortcut': '#سلا', 'expanded': 'السلام عليكم ورحمة الله وبركاته'},
     {'shortcut': '#وقت', 'expanded': 'الوقت الحالي: %time%'},
-    {'shortcut': '#تاريخ', 'expanded': 'تاريخ اليوم: %date%'},
   ];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('مكتبة الاختصارات (Texpand)'),
+        title: const Text('مكتبة الاختصارات'),
         centerTitle: true,
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {},
-        child: const Icon(Icons.add),
       ),
       body: ListView.builder(
         padding: const EdgeInsets.all(12),
@@ -389,10 +394,7 @@ class _TextExpanderTabState extends State<TextExpanderTab> {
           return Card(
             child: ListTile(
               leading: const Icon(Icons.bolt, color: Colors.amber),
-              title: Text(
-                item['shortcut']!,
-                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
-              ),
+              title: Text(item['shortcut']!, style: const TextStyle(fontWeight: FontWeight.bold)),
               subtitle: Text(item['expanded']!),
             ),
           );
