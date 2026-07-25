@@ -1,4 +1,4 @@
-name: starlink_text_expander
+name: starlink_expander
 description: "Starlink Hotspot Manager & Text Expander App"
 publish_to: 'none'
 version: 1.0.0+1
@@ -13,6 +13,8 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.6
   shared_preferences: ^2.2.2
+  intl: ^0.19.0
+  flutter_local_notifications: ^17.0.0
 
 dev_dependencies:
   flutter_test:
