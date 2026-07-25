@@ -104,7 +104,6 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   }
 }
 
-// ==================== 1. مدير شبكة Starlink (خيارات إشعارات مخصصة) ====================
 class StarlinkManagerTab extends StatefulWidget {
   const StarlinkManagerTab({super.key});
 
@@ -125,9 +124,8 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
   Timer? _timer;
   Timer? _bgScanTimer;
 
-  // توقيتات الإشعار المخصصة (يمكن تعديلها من الإعدادات)
-  int _notifOption1 = 2; // الخيار الأول بالافتراضي 2س
-  int _notifOption2 = 5; // الخيار الثاني بالافتراضي 5س
+  int _notifOption1 = 2;
+  int _notifOption2 = 5;
 
   static void addClientByIpStatic(String name, int hours) {
     StarlinkManagerTab.globalState?._addClient(name, hours);
@@ -136,6 +134,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
   @override
   void initState() {
     super.initState();
+    _requestPermissions(); // طلب الصلاحيات فور فتح الشاشة
     _loadClients();
     _loadNotifSettings();
 
@@ -144,9 +143,18 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
       if (mounted) setState(() {});
     });
 
-    _bgScanTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+    _bgScanTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       _autoScanNetwork();
     });
+  }
+
+  // طلب أذونات الإشعار والموقع تلقائياً
+  Future<void> _requestPermissions() async {
+    final androidPlugin = flutterLocalNotificationsPlugin
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    if (androidPlugin != null) {
+      await androidPlugin.requestNotificationsPermission();
+    }
   }
 
   @override
@@ -230,7 +238,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
 
       final isAlive = await _pingIP(targetIP);
       if (isAlive) {
-        String resolvedHost = 'جهاز';
+        String resolvedHost = 'جهاز متصل';
         try {
           final hostObj = await InternetAddress(targetIP).reverse().timeout(const Duration(milliseconds: 100));
           if (hostObj.host.isNotEmpty && hostObj.host != targetIP) {
@@ -259,7 +267,6 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
     }
   }
 
-  // بناء الإشعار بأزرار توقيت مخصصة
   Future<void> _showNewDeviceNotification(String fullLabel, String ipSuffix) async {
     final AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
       'starlink_auto_channel',
@@ -268,9 +275,9 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
       importance: Importance.max,
       priority: Priority.high,
       actions: [
-        AndroidNotificationAction('opt1', '$_notifOption1 ساعات', inputs: []),
-        AndroidNotificationAction('opt2', '$_notifOption2 ساعات', inputs: []),
-        const AndroidNotificationAction('cancel', 'إلغاء / حظر'),
+        AndroidNotificationAction('opt1', '$_notifOption1 ساعات'),
+        AndroidNotificationAction('opt2', '$_notifOption2 ساعات'),
+        const AndroidNotificationAction('cancel', 'إلغاء'),
       ],
     );
     final NotificationDetails platformDetails = NotificationDetails(android: androidDetails);
@@ -278,7 +285,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
     await flutterLocalNotificationsPlugin.show(
       DateTime.now().millisecondsSinceEpoch ~/ 1000,
       '📡 جهاز جديد اتصل بالشبكة!',
-      '$fullLabel - اختر مدة الاشتراك الفورية:',
+      '$fullLabel - اختر مدة الاشتراك:',
       platformDetails,
       payload: '$fullLabel|$_notifOption1',
     );
@@ -415,7 +422,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
       body: _clients.isEmpty
           ? const Center(
               child: Text(
-                'المراقب التلقائي شغال 📡\nاضغط على أيقونة الضبط ⚙️ بالأعلى لتغيير أزرار التوقيت ببطاقة الإشعار.',
+                'المراقب التلقائي شغال 📡\nاضغط على أيقونة الرادار بالأعلى لربط الأجهزة المتصلة.',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 15, color: Colors.grey),
               ),
@@ -536,7 +543,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
   }
 }
 
-// ==================== 2. مكتبة الاختصارات التفاعلية بالحساب الذكي للوقت ====================
+// ==================== 2. مكتبة الاختصارات ====================
 class TextExpanderTab extends StatefulWidget {
   const TextExpanderTab({super.key});
 
