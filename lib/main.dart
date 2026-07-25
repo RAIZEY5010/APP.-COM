@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart';
+import 'package:network_info_plus/network_info_plus.dart';
 import 'models/client_model.dart';
 
 void main() {
@@ -84,6 +86,7 @@ class StarlinkManagerTab extends StatefulWidget {
 
 class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
   List<ClientDevice> _clients = [];
+  bool _isScanning = false;
   Timer? _timer;
 
   @override
@@ -113,6 +116,44 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
     final prefs = await SharedPreferences.getInstance();
     final data = _clients.map((c) => c.toJson()).toList();
     await prefs.setStringList('starlink_clients', data);
+  }
+
+  // فحص الأجهزة المتصلة بشبكة Starlink الحالية
+  Future<void> _scanStarlinkNetwork() async {
+    setState(() => _isScanning = true);
+    final info = NetworkInfo();
+    final wifiIP = await info.getWifiIP();
+
+    if (wifiIP == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('يرجى الاتصال بشبكة Starlink أولاً!')),
+        );
+      }
+      setState(() => _isScanning = false);
+      return;
+    }
+
+    final subnet = wifiIP.substring(0, wifiIP.lastIndexOf('.'));
+    int foundCount = 0;
+
+    // مسح النطاق المحلي للشبكة
+    for (int i = 1; i < 50; i++) {
+      final targetIP = '$subnet.$i';
+      try {
+        final socket = await Socket.connect(targetIP, 80, timeout: const Duration(milliseconds: 50));
+        socket.destroy();
+        foundCount++;
+      } catch (_) {}
+    }
+
+    setState(() => _isScanning = false);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('تم فحص شبكة Starlink! عُثر على $foundCount جهازاً نشطاً.')),
+      );
+    }
   }
 
   void _addClient(String name, int hours) {
@@ -161,7 +202,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
             TextField(
               controller: nameController,
               decoration: const InputDecoration(
-                labelText: 'اسم الجهاز أو العميل',
+                labelText: 'اسم الجهاز (مثل: Redmi-13C)',
                 border: OutlineInputBorder(),
                 prefixIcon: Icon(Icons.phone_android),
               ),
@@ -215,10 +256,16 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
         title: const Text('أجهزة Starlink المتصلة'),
         centerTitle: true,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadClients,
-          )
+          _isScanning
+              ? const Padding(
+                  padding: EdgeInsets.all(12.0),
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : IconButton(
+                  icon: const Icon(Icons.radar),
+                  tooltip: 'فحص شبكة Starlink',
+                  onPressed: _scanStarlinkNetwork,
+                ),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
@@ -229,7 +276,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
       body: _clients.isEmpty
           ? const Center(
               child: Text(
-                'لا توجد أجهزة مربوطة حالياً.\nاضغط على "ربط جهاز جديد" للبدء.',
+                'لا توجد أجهزة مربوطة حالياً.\nاضغط على أيقونة الرادار للفحص أو "ربط جهاز جديد".',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 16, color: Colors.grey),
               ),
@@ -265,7 +312,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                     subtitle: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAlignment.start,
                       children: [
                         const SizedBox(height: 4),
                         Text('وقت الاتصال: ${timeFormat.format(client.startTime)}'),
