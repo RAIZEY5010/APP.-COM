@@ -104,7 +104,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   }
 }
 
-// ==================== 1. مدير شبكة Starlink ====================
+// ==================== 1. مدير شبكة Starlink (خيارات إشعارات مخصصة) ====================
 class StarlinkManagerTab extends StatefulWidget {
   const StarlinkManagerTab({super.key});
 
@@ -125,6 +125,10 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
   Timer? _timer;
   Timer? _bgScanTimer;
 
+  // توقيتات الإشعار المخصصة (يمكن تعديلها من الإعدادات)
+  int _notifOption1 = 2; // الخيار الأول بالافتراضي 2س
+  int _notifOption2 = 5; // الخيار الثاني بالافتراضي 5س
+
   static void addClientByIpStatic(String name, int hours) {
     StarlinkManagerTab.globalState?._addClient(name, hours);
   }
@@ -133,15 +137,14 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
   void initState() {
     super.initState();
     _loadClients();
+    _loadNotifSettings();
 
-    // فحص كل ثانية لتحديث العداد وإرسال تنبيه الانتهاء
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       _checkExpiredClients();
       if (mounted) setState(() {});
     });
 
-    // مراقبة أجهزة الشبكة الجديدة كل 25 ثانية
-    _bgScanTimer = Timer.periodic(const Duration(seconds: 25), (_) {
+    _bgScanTimer = Timer.periodic(const Duration(seconds: 20), (_) {
       _autoScanNetwork();
     });
   }
@@ -151,6 +154,24 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
     _timer?.cancel();
     _bgScanTimer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _loadNotifSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _notifOption1 = prefs.getInt('notif_opt1') ?? 2;
+      _notifOption2 = prefs.getInt('notif_opt2') ?? 5;
+    });
+  }
+
+  Future<void> _saveNotifSettings(int opt1, int opt2) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('notif_opt1', opt1);
+    await prefs.setInt('notif_opt2', opt2);
+    setState(() {
+      _notifOption1 = opt1;
+      _notifOption2 = opt2;
+    });
   }
 
   Future<void> _loadClients() async {
@@ -168,7 +189,6 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
     await prefs.setStringList('starlink_clients', data);
   }
 
-  // فحص الأجهزة المنتهية وإرسال إشعار فوري
   void _checkExpiredClients() {
     for (var client in _clients) {
       if (client.remainingSeconds <= 0 && !_notifiedExpiredIDs.contains(client.id)) {
@@ -204,17 +224,15 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
 
     final subnet = wifiIP.substring(0, wifiIP.lastIndexOf('.'));
 
-    for (int i = 2; i < 50; i++) {
+    for (int i = 2; i < 60; i++) {
       final targetIP = '$subnet.$i';
       final ipSuffix = '.$i';
 
-      try {
-        final socket = await Socket.connect(targetIP, 80, timeout: const Duration(milliseconds: 35));
-        socket.destroy();
-
+      final isAlive = await _pingIP(targetIP);
+      if (isAlive) {
         String resolvedHost = 'جهاز';
         try {
-          final hostObj = await InternetAddress(targetIP).reverse().timeout(const Duration(milliseconds: 60));
+          final hostObj = await InternetAddress(targetIP).reverse().timeout(const Duration(milliseconds: 100));
           if (hostObj.host.isNotEmpty && hostObj.host != targetIP) {
             resolvedHost = hostObj.host.split('.').first;
           }
@@ -228,31 +246,41 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
         _knownIPs.add(targetIP);
 
         _showNewDeviceNotification(fullDeviceLabel, ipSuffix);
-      } catch (_) {}
+      }
     }
   }
 
+  Future<bool> _pingIP(String ip) async {
+    try {
+      final result = await Process.run('ping', ['-c', '1', '-w', '1', ip]);
+      return result.exitCode == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // بناء الإشعار بأزرار توقيت مخصصة
   Future<void> _showNewDeviceNotification(String fullLabel, String ipSuffix) async {
-    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+    final AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
       'starlink_auto_channel',
       'تنبيهات أجهزة Starlink',
       channelDescription: 'تنبيهات فورية عند اتصال أجهزة جديدة',
       importance: Importance.max,
       priority: Priority.high,
       actions: [
-        AndroidNotificationAction('2h', '2 ساعة'),
-        AndroidNotificationAction('4h', '4 ساعات'),
-        AndroidNotificationAction('cancel', 'إلغاء / حظر'),
+        AndroidNotificationAction('opt1', '$_notifOption1 ساعات', inputs: []),
+        AndroidNotificationAction('opt2', '$_notifOption2 ساعات', inputs: []),
+        const AndroidNotificationAction('cancel', 'إلغاء / حظر'),
       ],
     );
-    const NotificationDetails platformDetails = NotificationDetails(android: androidDetails);
+    final NotificationDetails platformDetails = NotificationDetails(android: androidDetails);
 
     await flutterLocalNotificationsPlugin.show(
       DateTime.now().millisecondsSinceEpoch ~/ 1000,
       '📡 جهاز جديد اتصل بالشبكة!',
-      '$fullLabel - اختر مدة الاشتراك:',
+      '$fullLabel - اختر مدة الاشتراك الفورية:',
       platformDetails,
-      payload: '$fullLabel|4',
+      payload: '$fullLabel|$_notifOption1',
     );
   }
 
@@ -289,6 +317,70 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
     _saveClients();
   }
 
+  void _showNotificationSettingsDialog() {
+    int tempOpt1 = _notifOption1;
+    int tempOpt2 = _notifOption2;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('تخصيص أزرار توقيت الإشعار'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('اختر التوقيتين اللذين ترغب بظهورهما في أزرار الإشعار الفوري:'),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                const Text('الخيار الأول: '),
+                const SizedBox(width: 8),
+                DropdownButton<int>(
+                  value: tempOpt1,
+                  items: [1, 2, 3, 4, 5, 6, 8, 12, 24].map((h) {
+                    return DropdownMenuItem(value: h, child: Text('$h ساعات'));
+                  }).toList(),
+                  onChanged: (val) {
+                    if (val != null) setState(() => tempOpt1 = val);
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                const Text('الخيار الثاني: '),
+                const SizedBox(width: 8),
+                DropdownButton<int>(
+                  value: tempOpt2,
+                  items: [1, 2, 3, 4, 5, 6, 8, 12, 24].map((h) {
+                    return DropdownMenuItem(value: h, child: Text('$h ساعات'));
+                  }).toList(),
+                  onChanged: (val) {
+                    if (val != null) setState(() => tempOpt2 = val);
+                  },
+                ),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
+          ElevatedButton(
+            onPressed: () {
+              _saveNotifSettings(tempOpt1, tempOpt2);
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('تم حفظ التوقيتات: ($tempOpt1 ساعات و $tempOpt2 ساعات)')),
+              );
+            },
+            child: const Text('حفظ التوقيتات'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final timeFormat = DateFormat('hh:mm a', 'ar');
@@ -299,12 +391,17 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
         centerTitle: true,
         actions: [
           IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'إعدادات أزرار الإشعار',
+            onPressed: _showNotificationSettingsDialog,
+          ),
+          IconButton(
             icon: const Icon(Icons.radar),
             tooltip: 'فحص الشبكة فوراً',
             onPressed: () {
               _autoScanNetwork();
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('جاري فحص الشبكة...')),
+                const SnackBar(content: Text('جاري فحص الأجهزة المتصلة بـ Starlink...')),
               );
             },
           ),
@@ -318,7 +415,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
       body: _clients.isEmpty
           ? const Center(
               child: Text(
-                'المراقب التلقائي شغال 📡\nعند دخول أي جهاز لشبكة Starlink سيصلك إشعار باسم الهاتف والـ IP.',
+                'المراقب التلقائي شغال 📡\nاضغط على أيقونة الضبط ⚙️ بالأعلى لتغيير أزرار التوقيت ببطاقة الإشعار.',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 15, color: Colors.grey),
               ),
@@ -396,7 +493,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
 
   void _showManualAddDialog() {
     final nameController = TextEditingController();
-    int hours = 4;
+    int hours = _notifOption1;
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -414,7 +511,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
             const SizedBox(height: 12),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [2, 4, 8, 12].map((h) => ChoiceChip(
+              children: [2, 4, 5, 8, 12].map((h) => ChoiceChip(
                 label: Text('$hس'),
                 selected: hours == h,
                 onSelected: (v) { if (v) setState(() => hours = h); },
@@ -439,7 +536,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
   }
 }
 
-// ==================== 2. مكتبة الاختصارات التفاعلية (Texpand) ====================
+// ==================== 2. مكتبة الاختصارات التفاعلية بالحساب الذكي للوقت ====================
 class TextExpanderTab extends StatefulWidget {
   const TextExpanderTab({super.key});
 
@@ -465,11 +562,10 @@ class _TextExpanderTabState extends State<TextExpanderTab> {
         _shortcuts = decoded.map((e) => Map<String, String>.from(e)).toList();
       });
     } else {
-      // اختصارات افتراضية
       _shortcuts = [
+        {'shortcut': 'mn', 'expanded': 'ينتهي اشتراكك الساعة: %time+5h%'},
         {'shortcut': '#سلا', 'expanded': 'السلام عليكم ورحمة الله وبركاته'},
-        {'shortcut': '#مرحب', 'expanded': 'أهلاً وسهلاً بك في خِدْمَاتِنا!'},
-        {'shortcut': '#حساب', 'expanded': 'رقم الحساب المصرفي: 1234-5678-9012'},
+        {'shortcut': '#وقت', 'expanded': 'الوقت الحالي: %time%'},
       ];
       _saveShortcuts();
     }
@@ -480,8 +576,24 @@ class _TextExpanderTabState extends State<TextExpanderTab> {
     await prefs.setString('saved_shortcuts', jsonEncode(_shortcuts));
   }
 
+  String _processDynamicText(String text) {
+    final now = DateTime.now();
+    final format = DateFormat('hh:mm a', 'ar');
+
+    text = text.replaceAll('%time%', format.format(now));
+
+    final regExp = RegExp(r'%time\+(\d+)h%');
+    text = text.replaceAllMapped(regExp, (match) {
+      final hoursToAdd = int.tryParse(match.group(1) ?? '0') ?? 0;
+      final futureDate = now.add(Duration(hours: hoursToAdd));
+      return format.format(futureDate);
+    });
+
+    return text;
+  }
+
   void _addOrEditShortcut({int? index}) {
-    final shortcutCtrl = TextEditingController(text: index != null ? _shortcuts[index]['shortcut'] : '#');
+    final shortcutCtrl = TextEditingController(text: index != null ? _shortcuts[index]['shortcut'] : '');
     final expandedCtrl = TextEditingController(text: index != null ? _shortcuts[index]['expanded'] : '');
 
     showDialog(
@@ -490,11 +602,12 @@ class _TextExpanderTabState extends State<TextExpanderTab> {
         title: Text(index == null ? 'إضافة اختصار جديد' : 'تعديل الاختصار'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             TextField(
               controller: shortcutCtrl,
               decoration: const InputDecoration(
-                labelText: 'رمز الاختصار (مثال: #سلا)',
+                labelText: 'رمز الاختصار (مثال: mn)',
                 border: OutlineInputBorder(),
               ),
             ),
@@ -504,8 +617,14 @@ class _TextExpanderTabState extends State<TextExpanderTab> {
               maxLines: 3,
               decoration: const InputDecoration(
                 labelText: 'النص الكامل البديل',
+                hintText: 'مثال: ينتهي الوقت %time+5h%',
                 border: OutlineInputBorder(),
               ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              '💡 يمكنك استخدام:\n• %time% للوقت الحالي\n• %time+2h% للوقت بعد ساعتين\n• %time+5h% للوقت بعد 5 ساعات',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
             ),
           ],
         ),
@@ -557,6 +676,8 @@ class _TextExpanderTabState extends State<TextExpanderTab> {
               itemCount: _shortcuts.length,
               itemBuilder: (context, index) {
                 final item = _shortcuts[index];
+                final processedText = _processDynamicText(item['expanded']!);
+
                 return Card(
                   margin: const EdgeInsets.symmetric(vertical: 4),
                   child: ListTile(
@@ -565,17 +686,23 @@ class _TextExpanderTabState extends State<TextExpanderTab> {
                       item['shortcut']!,
                       style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                     ),
-                    subtitle: Text(item['expanded']!),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('النص المنسوخ: $processedText', style: const TextStyle(color: Colors.indigo, fontWeight: FontWeight.bold)),
+                        Text('القالب: ${item['expanded']}', style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                      ],
+                    ),
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         IconButton(
                           icon: const Icon(Icons.copy, color: Colors.blue),
-                          tooltip: 'نسخ النص',
+                          tooltip: 'نسخ النص بالوقت المحسوب',
                           onPressed: () {
-                            Clipboard.setData(ClipboardData(text: item['expanded']!));
+                            Clipboard.setData(ClipboardData(text: processedText));
                             ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('تم نسخ النص إلى الحافظة!')),
+                              SnackBar(content: Text('تم النسخ بالوقت المحسوب: ($processedText)')),
                             );
                           },
                         ),
