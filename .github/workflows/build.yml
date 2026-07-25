@@ -24,7 +24,13 @@ jobs:
           channel: 'stable'
 
       - name: Auto Generate Android Files
-        run: flutter create . --project-name starlink_expander --org com.raizey.starlinkexpander --platforms android --force
+        run: |
+          mkdir -p temp_app
+          cd temp_app
+          flutter create my_app --org com.raizey.starlinkexpander --platforms android
+          cp -r my_app/android ../
+          cd ..
+          rm -rf temp_app
 
       - name: Install dependencies
         run: flutter pub get
