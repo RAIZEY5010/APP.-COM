@@ -181,8 +181,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
                     selected: isSelected,
                     onSelected: (val) {
                       if (val) setDialogState(() => selectedHours = hours);
-                    },
-                  );
+                 EdgeInsets.sy🌹11:25🌹et       );
                 }).toList(),
               ),
             ),
@@ -267,7 +266,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                     subtitle: Column(
-                      crossAxisAlignment: CrossAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const SizedBox(height: 4),
                         Text('وقت الاتصال: ${timeFormat.format(client.startTime)}'),
@@ -297,7 +296,7 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
                         ),
                         IconButton(
                           icon: const Icon(Icons.delete_outline, color: Colors.red),
-                          onPressed: () => _deleteClient(client),
+                          onPressed: () => _deleteClient(client.id),
                           tooltip: 'حذف الجهاز',
                         ),
                       ],
@@ -319,7 +318,7 @@ class TextExpanderTab extends StatefulWidget {
 }
 
 class _TextExpanderTabState extends State<TextExpanderTab> {
-  List<Map<String, String>> _shortcuts = [
+  final List<Map<String, String>> _shortcuts = [
     {'shortcut': '#سلا', 'expanded': 'السلام عليكم ورحمة الله وبركاته'},
     {'shortcut': '#وقت', 'expanded': 'الوقت الحالي: %time%'},
     {'shortcut': '#تاريخ', 'expanded': 'تاريخ اليوم: %date%'},
