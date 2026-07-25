@@ -131,10 +131,8 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
   void _togglePause(ClientDevice client) {
     setState(() {
       if (client.isPaused) {
-        // استئناف
         client.isPaused = false;
       } else {
-        // إيقاف مؤقت
         client.remainingSecondsWhenPaused = client.remainingSeconds;
         client.isPaused = true;
       }
@@ -181,7 +179,8 @@ class _StarlinkManagerTabState extends State<StarlinkManagerTab> {
                     selected: isSelected,
                     onSelected: (val) {
                       if (val) setDialogState(() => selectedHours = hours);
-                 EdgeInsets.sy🌹11:25🌹et       );
+                    },
+                  );
                 }).toList(),
               ),
             ),
